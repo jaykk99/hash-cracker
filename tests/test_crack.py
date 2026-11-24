@@ -46,6 +46,22 @@ class TestIdentify(unittest.TestCase):
         self.assertEqual(crack.identify("zzzz")[0], "unknown")
 
 
+    def test_bcrypt_legacy_prefix(self):
+        # Original "$2$" bcrypt hashes identify as bcrypt too.
+        self.assertEqual(crack.identify("$2$12$abcdefghijklmnopqrstuu")[0],
+                         "bcrypt")
+
+
+class TestSlowCandidates(unittest.TestCase):
+    def test_limit_is_respected(self):
+        got = list(crack.slow_candidates(["alpha"], 2))
+        self.assertEqual(got, [("alpha", "as-is"),
+                               ("Alpha", "capitalized")])
+
+    def test_zero_limit_yields_nothing(self):
+        self.assertEqual(list(crack.slow_candidates(["alpha"], 0)), [])
+
+
 class TestCrackFast(unittest.TestCase):
     def _run(self, hashes, words=WORDS):
         targets = {}
@@ -106,16 +122,91 @@ class TestBcrypt(unittest.TestCase):
 
 
 class TestCLI(unittest.TestCase):
-    def test_cli_json(self):
+    def _run_cli(self, *args):
         here = os.path.join(os.path.dirname(__file__), "..")
-        proc = subprocess.run(
-            [sys.executable, os.path.join(here, "crack.py"),
-             MD5_PASSWORD, "--json"],
+        return subprocess.run(
+            [sys.executable, os.path.join(here, "crack.py"), *args],
             capture_output=True, text=True, timeout=300)
+
+    def test_cli_json(self):
+        proc = self._run_cli(MD5_PASSWORD, "--json")
         self.assertEqual(proc.returncode, 0)
         data = json.loads(proc.stdout)
         self.assertEqual(data["results"][0]["plaintext"], "password")
         self.assertTrue(data["results"][0]["cracked"])
+
+    def test_cli_uppercase_hash(self):
+        # Hex hashes are case-insensitive on input.
+        proc = self._run_cli(MD5_PASSWORD.upper(), "--json")
+        self.assertEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        self.assertTrue(data["results"][0]["cracked"])
+        self.assertEqual(data["results"][0]["plaintext"], "password")
+
+    def test_cli_file_mode(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".txt",
+                                         delete=False) as fh:
+            fh.write("# comment line\n\n%s\n%s\n" % (MD5_PASSWORD,
+                                                      SHA1_PASSWORD))
+            path = fh.name
+        try:
+            proc = self._run_cli("--file", path, "--json")
+            self.assertEqual(proc.returncode, 0)
+            data = json.loads(proc.stdout)
+            self.assertEqual(len(data["results"]), 2)
+            self.assertTrue(all(r["cracked"] for r in data["results"]))
+            self.assertEqual({r["plaintext"] for r in data["results"]},
+                             {"password"})
+        finally:
+            os.unlink(path)
+
+    def test_cli_unknown_hash(self):
+        proc = self._run_cli("zzzz", "--json")
+        self.assertEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        r = data["results"][0]
+        self.assertFalse(r["cracked"])
+        self.assertIn("unrecognized hash format", r["error"])
+
+    def test_cli_duplicate_hash(self):
+        proc = self._run_cli(MD5_PASSWORD, MD5_PASSWORD, "--json")
+        self.assertEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        self.assertEqual(len(data["results"]), 2)
+        self.assertTrue(all(r["cracked"] for r in data["results"]))
+
+    def test_cli_text_output(self):
+        proc = self._run_cli(MD5_PASSWORD)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("CRACKED: password", proc.stdout)
+        self.assertIn("1/1 cracked", proc.stderr)
+
+    def test_cli_algo_md5_only(self):
+        proc = self._run_cli(MD5_PASSWORD, "--algo", "md5", "--json")
+        self.assertEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        r = data["results"][0]
+        self.assertTrue(r["cracked"])
+        self.assertEqual(r["algo"], "md5")
+        self.assertEqual(r["plaintext"], "password")
+
+    def test_cli_algo_ntlm_only(self):
+        proc = self._run_cli(NTLM_PASSWORD, "--algo", "ntlm", "--json")
+        self.assertEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        r = data["results"][0]
+        self.assertTrue(r["cracked"])
+        self.assertEqual(r["algo"], "ntlm")
+        self.assertEqual(r["plaintext"], "password")
+
+    def test_cli_algo_mismatch(self):
+        proc = self._run_cli(MD5_PASSWORD, "--algo", "sha256", "--json")
+        self.assertEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        r = data["results"][0]
+        self.assertFalse(r["cracked"])
+        self.assertIn("--algo sha256 does not match", r["error"])
 
 
 if __name__ == "__main__":

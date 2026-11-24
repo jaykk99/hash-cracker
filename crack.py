@@ -8,6 +8,7 @@ Usage:
     python3 crack.py <hash> [more hashes...]
     python3 crack.py --file hashes.txt
     python3 crack.py --file hashes.txt --wordlist rockyou.txt --json
+    python3 crack.py <hash> --algo md5   # force one algorithm
 
 Algorithms: MD5, NTLM, SHA-1, SHA-224/256/384/512, SHA3-224/256/384/512,
 bcrypt (needs the `bcrypt` pip package; only top candidates are practical).
@@ -50,7 +51,7 @@ _ALGO_LABEL = {
 def identify(hash_str):
     """Return (kind, algos) where kind is 'fast', 'bcrypt', or 'unknown'."""
     h = hash_str.strip()
-    if h.startswith(("$2a$", "$2b$", "$2y$")):
+    if h.startswith(("$2$", "$2a$", "$2b$", "$2y$")):
         return "bcrypt", ["bcrypt"]
     low = h.lower()
     if all(c in "0123456789abcdef" for c in low) and len(low) in _HEX_LEN_TO_ALGOS:
@@ -117,10 +118,10 @@ def slow_candidates(words, limit):
     for word in words:
         for form, rule in _base_forms(word):
             if rule in ("as-is", "capitalized", "upper"):
-                yield form, rule
-                count += 1
                 if count >= limit:
                     return
+                yield form, rule
+                count += 1
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +168,6 @@ def crack_fast(targets, words, progress=False):
                 print("  [%s] %d candidates, %d/%d cracked..."
                       % (algo, tried, len(results), len(targets)),
                       file=sys.stderr)
-        for h in list(live):
-            pass  # still uncracked under this algo; other algos may match
     for h in remaining:
         algos = targets[h]
         results[h] = {
@@ -234,6 +233,10 @@ def main(argv=None):
                     help="wordlist path (default: bundled 10k-most-common)")
     ap.add_argument("--bcrypt-limit", type=int, default=300,
                     help="max candidates to try per bcrypt hash (default 300)")
+    ap.add_argument("--algo", choices=sorted(_ALGO_LABEL),
+                    help="force one algorithm instead of trying every match "
+                         "for an ambiguous hash length (e.g. --algo md5 for "
+                         "a 32-hex hash skips the NTLM pass)")
     ap.add_argument("--json", action="store_true", help="JSON output")
     ap.add_argument("--progress", action="store_true",
                     help="progress to stderr during long passes")
@@ -263,6 +266,37 @@ def main(argv=None):
 
     t0 = time.time()
     results = {}
+    if args.algo:
+        # Narrow each target to the forced algorithm; a target whose
+        # identified type does not include it gets an error result instead
+        # of a wasted pass.
+        forced = args.algo
+        for key in list(fast_targets):
+            algos = fast_targets[key]
+            if forced in algos:
+                fast_targets[key] = [forced]
+            else:
+                results[key] = {
+                    "hash": key,
+                    "type": "/".join(_ALGO_LABEL[a] for a in algos),
+                    "algo": None, "cracked": False, "plaintext": None,
+                    "rule": None, "candidates_tried": 0, "seconds": 0,
+                    "error": "--algo %s does not match this hash "
+                             "(identified as %s)"
+                             % (forced, "/".join(_ALGO_LABEL[a]
+                                                for a in algos)),
+                }
+                del fast_targets[key]
+        for h in list(bcrypt_targets):
+            if forced != "bcrypt":
+                results[h] = {
+                    "hash": h, "type": "bcrypt", "algo": None,
+                    "cracked": False, "plaintext": None, "rule": None,
+                    "candidates_tried": 0, "seconds": 0,
+                    "error": "--algo %s does not match this hash "
+                             "(identified as bcrypt)" % forced,
+                }
+                bcrypt_targets.remove(h)
     if fast_targets:
         results.update(crack_fast(fast_targets, words,
                                   progress=args.progress))

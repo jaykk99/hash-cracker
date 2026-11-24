@@ -45,6 +45,9 @@ python3 crack.py --file hashes.txt --wordlist /path/to/rockyou.txt --json
 
 # bcrypt: cap how many top candidates to try (default 300)
 python3 crack.py '$2b$12$...' --bcrypt-limit 1000
+
+# Ambiguous length? Force one algorithm (32-hex as MD5 only, skip NTLM pass)
+python3 crack.py 5f4dcc3b5aa765d61d8327deb882cf99 --algo md5
 ```
 
 Output per hash: type, `CRACKED: <plaintext>` (plus the rule that found it,
