@@ -60,7 +60,11 @@ def identify(hash_str):
 
 def digest_for(algo, candidate_bytes):
     if algo == "ntlm":
-        return ntlm_hex(candidate_bytes.decode("utf-8", "ignore"))
+        # Strict decode: candidates always originate as str, so this
+        # round-trips exactly. Never errors="ignore" here: silently
+        # dropping bytes would hash a different password than the
+        # candidate being reported.
+        return ntlm_hex(candidate_bytes.decode("utf-8"))
     return hashlib.new(algo, candidate_bytes).hexdigest()
 
 
@@ -74,10 +78,11 @@ _LEET = str.maketrans({"a": "4", "e": "3", "i": "1", "o": "0", "s": "5",
 _COMMON_SUFFIXES = ["123", "1234", "12345", "123456", "12345678",
                     "007", "69", "420", "666", "777", "888", "999",
                     "111", "000", "2023", "2024", "2025", "2026"]
-_FULL_SUFFIXES = (["", "!"] + [str(d) for d in range(10)]
-                  + ["%02d" % d for d in range(100)]
-                  + _COMMON_SUFFIXES
-                  + [str(y) for y in range(1970, 2031)])
+_FULL_SUFFIXES = list(dict.fromkeys(
+    ["", "!"] + [str(d) for d in range(10)]
+    + ["%02d" % d for d in range(100)]
+    + _COMMON_SUFFIXES
+    + [str(y) for y in range(1970, 2031)]))
 _LIGHT_SUFFIXES = ["", "!"] + [str(d) for d in range(10)]
 
 
@@ -140,6 +145,11 @@ def crack_fast(targets, words, progress=False):
         for a in algos:
             algo_targets.setdefault(a, set()).add(h)
     remaining = set(targets)
+    # Totals across every algorithm pass: a hash cracked under the
+    # second algo (e.g. NTLM after a full MD5 pass) did not cost 1
+    # candidate, it cost the whole first pass plus the second.
+    t_all = time.time()
+    tried_all = 0
 
     for algo, hashes in algo_targets.items():
         if not remaining:
@@ -151,13 +161,14 @@ def crack_fast(targets, words, progress=False):
         tried = 0
         for cand, rule in candidates(words):
             tried += 1
+            tried_all += 1
             d = digest_for(algo, cand.encode())
             if d in live:
                 results[d] = {
                     "hash": d, "type": _ALGO_LABEL[algo], "algo": algo,
                     "cracked": True, "plaintext": cand, "rule": rule,
-                    "candidates_tried": tried,
-                    "seconds": round(time.time() - start, 3),
+                    "candidates_tried": tried_all,
+                    "seconds": round(time.time() - t_all, 3),
                 }
                 remaining.discard(d)
                 live.discard(d)
@@ -241,13 +252,26 @@ def main(argv=None):
 
     raw = list(args.hashes)
     if args.file:
-        with open(args.file, "r", encoding="utf-8", errors="ignore") as fh:
-            raw += [ln.strip() for ln in fh if ln.strip()
-                    and not ln.startswith("#")]
+        try:
+            with open(args.file, "r", encoding="utf-8",
+                      errors="ignore") as fh:
+                for ln in fh:
+                    s = ln.strip()
+                    if s and not s.startswith("#"):
+                        raw.append(s)
+        except OSError as exc:
+            ap.error("cannot read hash file %s: %s" % (args.file, exc))
+    # Strip here, not in identify(): a hash pasted with surrounding
+    # whitespace must crack, not silently miss every candidate because
+    # the lookup key still carries the spaces.
+    raw = [h.strip() for h in raw if h.strip()]
     if not raw:
         ap.error("give at least one hash or --file")
 
-    words = load_words(args.wordlist)
+    try:
+        words = load_words(args.wordlist)
+    except OSError as exc:
+        ap.error("cannot read wordlist %s: %s" % (args.wordlist, exc))
     fast_targets, bcrypt_targets, unknown = {}, [], []
     order = []
     for h in raw:
